@@ -43,7 +43,10 @@ body{font-family:"Segoe UI",Inter,Arial,sans-serif;color:var(--text);background:
 .sub{color:var(--muted);font-size:10px;margin-top:2px;font-weight:700}
 .tool-group{margin-top:12px}
 .tool-title{font-size:10px;font-weight:900;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:0 0 7px}
-.stack{display:grid;gap:6px}
+.stack{display:grid;grid-template-columns:minmax(0,1fr);gap:6px}
+#jsonImportStatus{min-width:0;overflow-wrap:anywhere;font-size:12px}
+#jsonImportStatus:empty{display:none}
+#fileInfo{box-sizing:border-box;min-width:0;max-width:100%;white-space:normal;overflow-wrap:anywhere}
 .btn{width:100%;border:none;border-radius:10px;padding:9px 12px;font-size:13px;font-weight:800;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;transition:.15s;min-height:40px}
 .btn:hover{filter:brightness(1.08);transform:translateY(-1px)}
 .btn:active{transform:translateY(0)}
@@ -1274,9 +1277,9 @@ button[aria-label="Delete"]:hover{
   .checklist-home-btn{width:100% !important;}
 }
 </style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 
 </head>
 <body>
@@ -1307,11 +1310,11 @@ button[aria-label="Delete"]:hover{
 <button class="btn btn-soft" disabled="" id="generateActionPlanBtn" onclick="generateActionPlanPdf()">📝 Generate Action Plan</button>
 <button class="btn btn-primary" onclick="openJsonFile()">📂 Import JSON File</button>
 <input accept=".json,application/json" class="file-input" id="jsonInput" type="file"/>
+<div id="jsonImportStatus" role="status" aria-live="polite"></div>
 <button class="btn btn-soft" disabled="" id="saveBtn" onclick="saveJson()">💾 Save JSON File</button>
 <button class="btn btn-theme" id="themeBtn" onclick="toggleTheme()">🌙 Dark Mode</button>
 <button class="btn btn-warning" disabled="" id="clearFormBtn" onclick="openClearFormModal()">🧹 Clear Form</button>
 <button class="btn btn-warning" disabled="" id="clearBtn" onclick="openClearModal()">🗑️ Clear Loaded JSON</button>
-<button class="btn btn-danger" id="clearAllBtn" onclick="openClearAllModal()" type="button">🧨 Clear Browser Draft</button>
 <div class="autosave-badge" id="draftStatus"></div>
 </div>
 </div>
@@ -1569,6 +1572,9 @@ function clearJsonAccessRuntime(){
 }
 
 async function decryptEncryptedJsonBeforeLoad(wrapper, fileName){
+  if(!globalThis.crypto?.subtle){
+    throw new Error("Secure decryption is unavailable here. Open the HTML in a regular browser from localhost or HTTPS, then try again.");
+  }
   let attempt = 1;
   let pinError = "";
   while(true){
@@ -1757,6 +1763,9 @@ async function verifyJsonAccessBeforeLoad(rawData, fileName){
 
   // Unlimited PIN attempts: there is no permanent front-end lockout.
   // Any correct PIN entered at any time must immediately verify and load the JSON.
+  if(!globalThis.crypto?.subtle){
+    throw new Error("Secure decryption is unavailable here. Open the HTML in a regular browser from localhost or HTTPS, then try again.");
+  }
   let attempt = 1;
   let pinError = "";
   while(true){
@@ -1800,7 +1809,7 @@ async function verifyJsonAccessBeforeLoad(rawData, fileName){
 }
 
 async function loadJsonTextWithAccessControl(jsonText, fileName, handle=null, options={}){
-  const parsedWrapper = JSON.parse(jsonText);
+  const parsedWrapper = JSON.parse(String(jsonText).replace(/^\uFEFF/, ""));
   let parsed = parsedWrapper;
   clearJsonAccessRuntime();
   if(isEncryptedJsonWrapper(parsedWrapper)){
@@ -2872,22 +2881,25 @@ function setupHyphenComment(textarea,item){
   });
 }
 
-$("jsonInput").addEventListener("change",event=>{
-  const file=event.target.files[0];
+async function importSelectedJson(file, handle=null){
   if(!file) return;
-  const reader=new FileReader();
-  reader.onload=async ()=>{
-    try{
-      await loadJsonTextWithAccessControl(reader.result, file.name, null, {
-        note:"Loaded through standard file input. This browser may not allow direct overwrite; Save JSON will use Save As/download fallback."
-      });
-    }catch(err){
-      showAppModal("Invalid JSON File", safe(err.message || String(err)), {tone:"error",icon:"⛔"});
-    }finally{
-      event.target.value="";
-    }
-  };
-  reader.readAsText(file);
+  const status = $("jsonImportStatus");
+  status.textContent = "Reading JSON…";
+  try{
+    const loaded = await loadJsonTextWithAccessControl(await file.text(), file.name, handle);
+    status.textContent = loaded ? "JSON loaded." : "Import did not complete.";
+  }catch(error){
+    const message = error.message || String(error);
+    status.textContent = message;
+    showAppModal("Could Not Import JSON", safe(message), {tone:"error"});
+  }
+}
+
+$("jsonInput").addEventListener("change", event=>{
+  const input = event.currentTarget;
+  const file = input.files[0];
+  input.value = "";
+  void importSelectedJson(file);
 });
 
 function afterLoad(){
@@ -2926,24 +2938,7 @@ function clearLoadedNow(){
   toast("Loaded JSON and browser draft cleared");
 }
 
-async function openJsonFile(){
-  // On Chromium desktop this can keep a writable handle. On iPhone it falls back to normal file import.
-  if(window.showOpenFilePicker){
-    try{
-      const [handle] = await window.showOpenFilePicker({
-        multiple:false,
-        types:[{description:"JSON Files",accept:{"application/json":[".json"]}}]
-      });
-      const file = await handle.getFile();
-      const text = await file.text();
-      const loaded = await loadJsonTextWithAccessControl(text, file.name, handle, {toast:"JSON file loaded successfully"});
-      if(loaded) return;
-      return;
-    }catch(err){
-      if(err && err.name==="AbortError") return;
-      console.warn(err);
-    }
-  }
+function openJsonFile(){
   $("jsonInput").click();
 }
 
@@ -4345,5 +4340,3 @@ function actionPlanCss(){ return `
 </script>
 </body>
 </html>
-
-This Code developed by Majdi Ghazal
